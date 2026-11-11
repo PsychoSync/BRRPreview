@@ -45,6 +45,8 @@ struct BrowserList: View {
             }
             .buttonStyle(.bordered)
             .padding(10)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
         }
         .safeAreaInset(edge: .bottom, alignment: .leading) {
             if let spc = model.spc {

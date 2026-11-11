@@ -199,14 +199,15 @@ final class PreviewModel: ObservableObject {
     }
 
     /// Opens audio files in the waveform editor. BRR files are decoded and played. SPC files start playing.
-    /// While a sample replacement is open, audio files become the new sample instead.
+    /// While a sample replacement is open, a click previews a sample. Dropping it or choosing it selects it.
     func select(_ node: BrowserNode) {
         if replacement != nil {
-            guard node.isAudio else {
-                spc?.errorMessage = "Only audio files can replace a track's sample."
+            guard node.isAudio || node.isBRR else {
+                spc?.errorMessage = "Only audio or BRR files can preview as a replacement sample."
                 return
             }
-            replacement?.loadSource(node.url)
+            stop()
+            replacement?.previewSource(node.url)
             return
         }
         if node.isSPC {
@@ -501,7 +502,7 @@ final class PreviewModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = AudioImport.extensions.compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = AudioImport.sampleExtensions.compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         replacement?.loadSource(url)
     }

@@ -5,11 +5,13 @@ import CStbVorbis
 enum AudioImportError: LocalizedError {
     case empty
     case unreadableVorbis
+    case noBRRBlocks
 
     var errorDescription: String? {
         switch self {
         case .empty: return "The audio file contains no samples."
         case .unreadableVorbis: return "The Ogg Vorbis file couldn't be decoded."
+        case .noBRRBlocks: return "The BRR file doesn't contain any complete blocks."
         }
     }
 }
@@ -17,10 +19,17 @@ enum AudioImportError: LocalizedError {
 /// Reads an audio file as mono floating-point samples at the file's own sample rate.
 enum AudioImport {
     static let extensions: Set<String> = ["wav", "aif", "aiff", "caf", "m4a", "mp3", "ogg"]
+    /// Files that can become a new sample: audio, plus BRR, which is decoded to its samples.
+    static let sampleExtensions: Set<String> = extensions.union(["brr"])
 
     static func load(_ url: URL) throws -> EditableSample {
-        if url.pathExtension.lowercased() == "ogg" {
+        switch url.pathExtension.lowercased() {
+        case "ogg":
             return try loadVorbis(url)
+        case "brr":
+            return try loadBRR(url)
+        default:
+            break
         }
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
@@ -49,6 +58,17 @@ enum AudioImport {
             mono[i] *= scale
         }
         return EditableSample(samples: mono, sourceRate: format.sampleRate)
+    }
+
+    /// BRR decodes to 32 kHz samples. The loop, if the file has one, carries over.
+    private static func loadBRR(_ url: URL) throws -> EditableSample {
+        let decoded = BRRDecoder.decodeFile([UInt8](try Data(contentsOf: url)))
+        guard !decoded.samples.isEmpty else {
+            throw AudioImportError.noBRRBlocks
+        }
+        return EditableSample(samples: decoded.samples.map { Float($0) / 32768 },
+                              sourceRate: BRRDecoder.sampleRate,
+                              loopStart: decoded.loopStart)
     }
 
     /// AVFoundation can't read Ogg Vorbis, so those files go through stb_vorbis.

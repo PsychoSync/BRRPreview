@@ -11,6 +11,7 @@ final class BrowserNode: Identifiable {
     /// Audio files open in the waveform editor for conversion to BRR.
     var isAudio: Bool { !isDirectory && AudioImport.extensions.contains(url.pathExtension.lowercased()) }
     /// SPC song files play in the SPC player, with per-track tools.
+    var isBRR: Bool { !isDirectory && url.pathExtension.lowercased() == "brr" }
     var isSPC: Bool { !isDirectory && url.pathExtension.lowercased() == "spc" }
 
     init(url: URL, isDirectory: Bool) {

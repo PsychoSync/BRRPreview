@@ -12,7 +12,9 @@ final class SPCReplacement: ObservableObject {
 
     @Published var options = ReplacementOptions()
     @Published private(set) var newEditor: WaveEditor?
+    /// The original and a browser preview share one player, so only one of them sounds at a time.
     @Published private(set) var isAuditioningOriginal = false
+    @Published private(set) var isAuditioningSource = false
     @Published var errorMessage: String?
 
     private let player = SamplePlayer()
@@ -23,7 +25,7 @@ final class SPCReplacement: ObservableObject {
         self.label = label
         self.originalSamples = BRRDecoder.decode(snapshot.data).samples
         player.onFinished = { [weak self] in
-            Task { @MainActor in self?.isAuditioningOriginal = false }
+            Task { @MainActor in self?.stopAuditions() }
         }
     }
 
@@ -41,8 +43,7 @@ final class SPCReplacement: ObservableObject {
 
     func toggleOriginalPlayback() {
         if isAuditioningOriginal {
-            player.stop()
-            isAuditioningOriginal = false
+            stopAuditions()
             return
         }
         newEditor?.stopPlayback()
@@ -50,25 +51,50 @@ final class SPCReplacement: ObservableObject {
             try player.play(originalSamples, loopStart: snapshot.loopBlock.map { $0 * BRRDecoder.samplesPerBlock },
                             loop: false, rate: 1)
             isAuditioningOriginal = true
+            isAuditioningSource = false
             errorMessage = nil
         } catch {
             errorMessage = "Audio playback failed: \(error.localizedDescription)"
         }
     }
 
-    /// Space during a replacement: stops the original if it is playing, otherwise toggles the new sample.
+    /// Plays a sample from the browser without choosing it. It plays once at its native 32 kHz speed.
+    func previewSource(_ url: URL) {
+        newEditor?.stopPlayback()
+        do {
+            let decoded: BRRDecoder.Result
+            if url.pathExtension.lowercased() == "brr" {
+                decoded = BRRDecoder.decodeFile([UInt8](try Data(contentsOf: url)))
+            } else {
+                let sample = try AudioImport.load(url)
+                decoded = BRRDecoder.decodeFile(BRRConverter.convert(sample, outputRate: BRRDecoder.sampleRate).file)
+            }
+            guard !decoded.samples.isEmpty else {
+                throw SPCError(message: "\(url.lastPathComponent) doesn't contain any samples.")
+            }
+            try player.play(decoded.samples, loopStart: nil, loop: false, rate: 1)
+            isAuditioningSource = true
+            isAuditioningOriginal = false
+            errorMessage = nil
+        } catch {
+            stopAuditions()
+            errorMessage = "Couldn't preview \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    /// Space during a replacement: stops whatever sample is playing here, otherwise toggles the new sample.
     func togglePreview() {
-        if isAuditioningOriginal {
-            toggleOriginalPlayback()
+        if isAuditioningOriginal || isAuditioningSource {
+            stopAuditions()
         } else {
             newEditor?.togglePreview()
         }
     }
 
-    /// Loads an audio file as the new sample. Other file types are rejected.
+    /// Loads a sample file as the new sample. Audio and BRR files are accepted.
     func loadSource(_ url: URL) {
-        guard AudioImport.extensions.contains(url.pathExtension.lowercased()) else {
-            errorMessage = "\(url.lastPathComponent) isn't an audio file."
+        guard AudioImport.sampleExtensions.contains(url.pathExtension.lowercased()) else {
+            errorMessage = "\(url.lastPathComponent) isn't a sample file."
             return
         }
         do {
@@ -88,9 +114,14 @@ final class SPCReplacement: ObservableObject {
         return try session.replace(snapshot, with: newEditor.sample, options: options)
     }
 
-    func close() {
+    private func stopAuditions() {
         player.stop()
         isAuditioningOriginal = false
+        isAuditioningSource = false
+    }
+
+    func close() {
+        stopAuditions()
         newEditor?.stop()
         newEditor = nil
     }
@@ -185,8 +216,11 @@ struct SPCReplaceView: View {
                     Image(systemName: "square.and.arrow.down")
                         .font(.title)
                         .foregroundStyle(.secondary)
-                    Text("Drag an audio file from the browser here")
+                    Text("Drag a sample from the browser here")
                         .foregroundStyle(.secondary)
+                    Text("Click a browser sample to preview it")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                     Button("Select new sample…") {
                         model.chooseReplacementSource()
                     }

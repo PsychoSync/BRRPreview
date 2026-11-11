@@ -103,8 +103,9 @@ core, bundled in `Sources/CSpcEmu/`.
   directory address, and the voice or track number. Voice numbers are 1-based.
 - **Extract All…** writes every distinct sample in the song's directory to a folder you
   choose. Files are named `SRCN_XX_XXXX.brr`, with a matching `.txt` for each.
-- **Replace…** opens the original sample and a new one side by side. Drop an audio file
-  onto the new-sample area, or choose one with the button. Pick the pitch mode, fine
+- **Replace…** opens the original sample and a new one side by side. Click a sample in the
+  browser to preview it without choosing it. Drop a sample onto the new-sample area, or
+  choose one with the button. Audio files and BRR files both work as the new sample. Pick the pitch mode, fine
   tune, and what to do if the new sample is longer than the original (refuse, truncate,
   or relocate). Apply rewrites the sample in the song's RAM. The change is heard the
   next time that track plays a note, because the emulator keeps the old sample until
