@@ -17,7 +17,8 @@ struct ReplacementOptions: Equatable {
 
 /// One track's sample as it sits in live SPC RAM.
 struct SPCSampleSnapshot {
-    let voice: Int
+    /// The voice the sample was read from. Nil when read by track, since a track spans several voices.
+    let voice: Int?
     let sourceIndex: Int
     let directoryAddress: Int
     let start: Int
@@ -43,10 +44,16 @@ struct ReplacementResult {
 extension SPCSession {
     private static let blockSize = BRRDecoder.blockSize
     private static let directoryEntries = 64
+    /// Samples below this address sit in the driver's own RAM and are not song samples.
+    private static let firstSampleAddress = 0x0200
 
     /// Reads the sample that voice `voice` is currently pointing at, from live RAM.
     func snapshot(voice: Int) -> SPCSampleSnapshot? {
-        let sourceIndex = readDSP(voice * 0x10 + 4)
+        snapshot(sourceIndex: readDSP(voice * 0x10 + 4), voice: voice)
+    }
+
+    /// Reads the sample in directory slot `sourceIndex`, from live RAM.
+    func snapshot(sourceIndex: Int, voice: Int? = nil) -> SPCSampleSnapshot? {
         let directoryAddress = directoryBase + sourceIndex * 4
         guard let entry = readRAM(directoryAddress, count: 4), let ram = readRAM(0, count: 0x10000) else {
             return nil
@@ -68,6 +75,16 @@ extension SPCSession {
                                  loopBlock: loopBlock, frequency: frequency)
     }
 
+    /// Classifies the sample in directory slot `sourceIndex`, read from live RAM.
+    func guessInstrument(sourceIndex: Int) -> InstrumentGuess? {
+        guard let snapshot = snapshot(sourceIndex: sourceIndex) else { return nil }
+        return InstrumentClassifier.guess(
+            samples: BRRDecoder.decode(snapshot.data).samples,
+            sampleRate: Double(BRRDecoder.sampleRate),
+            pitchHz: snapshot.frequency,
+            hasLoop: snapshot.loopBlock != nil)
+    }
+
     /// The snapshot's audio as an editable sample, for the original side of the replacement page.
     func originalSample(_ snapshot: SPCSampleSnapshot) -> EditableSample {
         let decoded = BRRDecoder.decode(snapshot.data)
@@ -77,17 +94,35 @@ extension SPCSession {
     }
 
     /// Writes the sample as a BRR file that keeps the original loop point, plus a `.txt` metadata sidecar next to it.
-    func extract(_ snapshot: SPCSampleSnapshot, to brrURL: URL) throws -> URL {
+    func extract(_ snapshot: SPCSampleSnapshot, to brrURL: URL, track: SPCTrackState? = nil) throws -> URL {
         let file = BRREncoder.file(BRREncoder.Encoding(data: snapshot.data, blockCount: snapshot.blockCount,
                                                        loopBlock: snapshot.loopBlock))
         try Data(file).write(to: brrURL, options: .atomic)
 
         let sidecar = brrURL.deletingPathExtension().appendingPathExtension("txt")
-        try metadataText(for: snapshot).write(to: sidecar, atomically: true, encoding: .utf8)
+        try metadataText(for: snapshot, track: track).write(to: sidecar, atomically: true, encoding: .utf8)
         return sidecar
     }
 
-    private func metadataText(for snapshot: SPCSampleSnapshot) -> String {
+    /// Writes every distinct sample in the song's directory into `folder`, one BRR and sidecar each.
+    /// Returns how many samples were written.
+    func extractAll(to folder: URL) throws -> Int {
+        var seenStarts = Set<Int>()
+        var written = 0
+        for sourceIndex in 0..<Self.directoryEntries {
+            guard let snapshot = snapshot(sourceIndex: sourceIndex),
+                  snapshot.start >= Self.firstSampleAddress,
+                  seenStarts.insert(snapshot.start).inserted else {
+                continue
+            }
+            let name = String(format: "SRCN_%02X_%04X.brr", sourceIndex, snapshot.start)
+            _ = try extract(snapshot, to: folder.appendingPathComponent(name))
+            written += 1
+        }
+        return written
+    }
+
+    private func metadataText(for snapshot: SPCSampleSnapshot, track: SPCTrackState?) -> String {
         func hex(_ value: Int, digits: Int) -> String {
             String(format: "$%0\(digits)X", value)
         }
@@ -97,7 +132,14 @@ extension SPCSession {
             "Song: \(songTitle)",
             "Game: \(gameTitle)",
             "Author: \(authorName)",
-            "Voice: \(snapshot.voice)",
+        ]
+        if let track {
+            lines.append("Track: \(track.number)")
+            lines.append("Voices used: " + track.voicesUsed.sorted().map { "\($0 + 1)" }.joined(separator: ", "))
+        } else if let voice = snapshot.voice {
+            lines.append("Voice: \(voice + 1)")
+        }
+        lines += [
             "Sample index (SRCN): \(snapshot.sourceIndex) (\(hex(snapshot.sourceIndex, digits: 2)))",
             "Directory address: \(hex(snapshot.directoryAddress, digits: 4))",
             "Start address: \(hex(snapshot.start, digits: 4))",

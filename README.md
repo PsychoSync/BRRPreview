@@ -5,15 +5,21 @@ audio into BRR. Add one or more folders, expand them in the sidebar, and click a
 `.brr` file to play it back tuned to its note. The detail pane shows a waveform, the
 detected pitch, and a piano keyboard. Click an audio file to open the converter.
 
-- **Add Folders…** (⌘O) adds one or more folders to the browser. Each folder appears
-  as a tree, so a folder of instrument subfolders can be auditioned directly. Folders
-  expand and collapse on click. Right-click a top-level folder and choose
-  **Remove Folder** to drop it. The folder list is remembered between launches.
+- **Add Files…** (⇧⌘O) adds individual BRR, audio, or SPC files to the browser.
+  **Add Folders…** (⌘O) adds one or more folders. Each folder appears as a tree, so a
+  folder of instrument subfolders can be auditioned directly. Folders expand and
+  collapse on click. Right-click a top-level file or folder and choose **Remove File**
+  or **Remove Folder** to drop it. The list is remembered between launches.
 - **Pitch**: BRR files don't store a pitch, so the app estimates the sample's
   fundamental with autocorrelation and transposes it so the sample's note sounds.
   The note comes from the filename's trailing note name (e.g. `Eighty Pad C5` → C5),
   or C4 if the name has none. Samples with no clear pitch (drums, noise) play at the
   native rate with that note as the reference.
+- **Guess Instrument**: a button under the sample that guesses its instrument type
+  (drum, pluck, bass, lead, pad, or noise) from the envelope (attack, decay, and
+  whether it sustains or loops) and the spectrum (centroid and flatness). It is a
+  heuristic, not a trained model, so treat the result as a hint. The result also lists
+  the measurements behind it.
 - **Piano keys**: while the app is focused, the keyboard plays notes. Q through P
   play the white keys, and 2 3 5 6 7 0 9 play the black keys. The octave starts at
   the octave of the current note. Mouse clicks on the on-screen keys work too.
@@ -77,13 +83,26 @@ Selecting a `.spc` file starts it playing. Playback uses the GME emulator's SPC7
 core, bundled in `Sources/CSpcEmu/`.
 
 - **Transport**: play/pause and stop buttons, with a volume slider, sit at the bottom
-  of the sidebar while an SPC is open. Space plays or pauses. ↑/↓ move to the previous
+  of the sidebar while an SPC is open. On macOS 26 and later they use the system glass
+  effect; on earlier systems they fall back to a translucent material. Space plays or pauses. ↑/↓ move to the previous
   or next file. The piano keys are off in SPC mode.
-- **Tracks**: each of the 8 voices shows a realtime spectrum, its sample number (SRCN),
-  and its note. M and S mute or solo a track.
-- **Extract…** writes the track's sample as a `.brr` file with its loop point. A `.txt`
-  file with the same name holds the metadata: the SRCN, loop, detected pitch, and
-  directory address.
+- **Voices / Tracks**: the picker at the top of the SPC view switches between two modes.
+  *Voices* lists the SNES's 8 hardware voices, each with a realtime spectrum, its sample
+  number (SRCN), and its note. M and S mute or solo a voice.
+  *Tracks* lists one track per sample (SRCN), numbered in the order each sample is first
+  heard. A track stays in the list after its sample stops, and it records every voice
+  that has played it. Its 60-second timeline shows which voice played it at each moment.
+  M and S mute or solo a track. Mute and solo follow the sound, so a muted sample is
+  silenced on whichever voice it plays next. The mute can leak for up to about 33 ms
+  when a muted sample starts.
+- **Guess**: a button on each voice and track that runs the same heuristic on its
+  sample, read from the song's live RAM. The guess disappears once that row's sample
+  changes. It is a hint, not a trained model.
+- **Extract…** writes a voice's or track's sample as a `.brr` file with its loop point.
+  A `.txt` file with the same name holds the metadata: the SRCN, loop, detected pitch,
+  directory address, and the voice or track number. Voice numbers are 1-based.
+- **Extract All…** writes every distinct sample in the song's directory to a folder you
+  choose. Files are named `SRCN_XX_XXXX.brr`, with a matching `.txt` for each.
 - **Replace…** opens the original sample and a new one side by side. Drop an audio file
   onto the new-sample area, or choose one with the button. Pick the pitch mode, fine
   tune, and what to do if the new sample is longer than the original (refuse, truncate,
@@ -91,7 +110,11 @@ core, bundled in `Sources/CSpcEmu/`.
   next time that track plays a note, because the emulator keeps the old sample until
   then. Relocate moves the sample to a free area of RAM. That path is heuristic and
   hasn't been tested in real songs.
-- **Save SPC As…** writes the emulator's current state, including any replaced samples.
+- **Save SPC As…** opens a sheet with the song's extended (xid6) tags: song, game,
+  artist, dumper, comments, soundtrack title, publisher, and date dumped (yyyymmdd).
+  Changed fields are written; untouched tags keep their original bytes. Clearing a
+  field removes it. After you confirm, a save panel writes the emulator's current state,
+  including any replaced samples, with the tags. Files without tags can gain them.
 
 The emulator is GME (game-music-emu) by Shay Green, licensed under LGPL-2.1. See
 `Sources/CSpcEmu/LICENSE-GME.txt`.
@@ -107,4 +130,6 @@ open build/BRRPreview.app
 
 The build explicitly targets `x86_64` to match the other apps in `macOS/`. To
 build and launch in one step, run `make run`. Run the decoder tests with
-`make test`. The app icon is `Resources/AppIcon.icns`, which `make app` copies into the bundle.
+`make test`. The app icon is `Resources/AppIcon.icns`, which `make app` copies into the bundle. The faint
+background behind the file browser is `Resources/Background.png`, also copied by `make app`. It
+only appears in the built `.app`, not under `swift run`.

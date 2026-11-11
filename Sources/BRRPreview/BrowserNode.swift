@@ -26,6 +26,11 @@ final class BrowserNode: Identifiable {
         return loadedChildren
     }
 
+    static func isSupportedFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == "brr" || ext == "spc" || AudioImport.extensions.contains(ext)
+    }
+
     static func contents(of folder: URL) -> [BrowserNode] {
         let entries = (try? FileManager.default.contentsOfDirectory(
             at: folder,
@@ -35,8 +40,7 @@ final class BrowserNode: Identifiable {
 
         let nodes = entries.compactMap { url -> BrowserNode? in
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            let ext = url.pathExtension.lowercased()
-            guard isDirectory || ext == "brr" || ext == "spc" || AudioImport.extensions.contains(ext) else { return nil }
+            guard isDirectory || isSupportedFile(url) else { return nil }
             return BrowserNode(url: url, isDirectory: isDirectory)
         }
 

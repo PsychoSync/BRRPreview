@@ -28,6 +28,16 @@ final class SPCSampleTests: XCTestCase {
         session.shutdown()
     }
 
+    /// An unedited xid6 block must serialize back to the same bytes it was read from.
+    func testFixtureTagsRoundTripUnchanged() throws {
+        let fixture = try openFixture()
+        let original = try Data(contentsOf: fixture.url)
+        let tail = [UInt8](original.dropFirst(SPCSession.fileSize))
+        try XCTSkipIf(tail.isEmpty, "The fixture has no xid6 block.")
+
+        XCTAssertEqual(fixture.extendedTags.serialized(), tail)
+    }
+
     func testRejectsFileWithoutSPCHeader() throws {
         let junk = Data(repeating: 0x41, count: SPCSession.fileSize)
         let copy = FileManager.default.temporaryDirectory.appendingPathComponent("junk-\(UUID().uuidString).spc")
@@ -70,6 +80,16 @@ final class SPCSampleTests: XCTestCase {
         XCTAssertTrue(endHeader & 0x01 != 0, "Last block of a chain must carry END")
     }
 
+    func testGuessInstrumentClassifiesLiveSample() throws {
+        let session = try openFixture()
+        defer { session.shutdown() }
+        let snapshot = try firstSounding(session)
+
+        let guess = try XCTUnwrap(session.guessInstrument(sourceIndex: snapshot.sourceIndex))
+        XCTAssertEqual(guess.features.pitchHz, snapshot.frequency)
+        XCTAssertEqual(guess.features.hasLoop, snapshot.loopBlock != nil)
+    }
+
     func testExtractWritesBRRAndMetadata() throws {
         let session = try openFixture()
         defer { session.shutdown() }
@@ -89,6 +109,22 @@ final class SPCSampleTests: XCTestCase {
         XCTAssertTrue(text.contains("Sample index (SRCN):"))
     }
 
+    func testExtractAllWritesOneFilePerDistinctSample() throws {
+        let session = try openFixture()
+        defer { session.shutdown() }
+
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("spc-all-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let count = try session.extractAll(to: folder)
+        let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        let brrCount = files.filter { $0.hasSuffix(".brr") }.count
+        XCTAssertGreaterThan(count, 0, "The fixture song should contain at least one sample")
+        XCTAssertEqual(brrCount, count)
+        XCTAssertEqual(files.filter { $0.hasSuffix(".txt") }.count, count)
+    }
+
     func testSameAudioReplacementKeepsSlotAndData() throws {
         let session = try openFixture()
         defer { session.shutdown() }
@@ -103,7 +139,7 @@ final class SPCSampleTests: XCTestCase {
         XCTAssertEqual(result.loopBlock, snapshot.loopBlock)
 
         let written = try XCTUnwrap(session.readRAM(snapshot.start, count: result.blockCount * 9))
-        let reread = try XCTUnwrap(session.snapshot(voice: snapshot.voice))
+        let reread = try XCTUnwrap(session.snapshot(sourceIndex: snapshot.sourceIndex))
         XCTAssertEqual(reread.start, snapshot.start)
 
         let before = BRRDecoder.decode(snapshot.data).samples.map(Double.init)

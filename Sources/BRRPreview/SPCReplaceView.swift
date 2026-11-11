@@ -6,6 +6,8 @@ import SwiftUI
 final class SPCReplacement: ObservableObject {
     let session: SPCSession
     let snapshot: SPCSampleSnapshot
+    /// What the user sees for this sample, such as "Voice 3" or "Track 2".
+    let label: String
     let originalSamples: [Int16]
 
     @Published var options = ReplacementOptions()
@@ -15,11 +17,10 @@ final class SPCReplacement: ObservableObject {
 
     private let player = SamplePlayer()
 
-    var voice: Int { snapshot.voice }
-
-    init(session: SPCSession, snapshot: SPCSampleSnapshot) {
+    init(session: SPCSession, snapshot: SPCSampleSnapshot, label: String) {
         self.session = session
         self.snapshot = snapshot
+        self.label = label
         self.originalSamples = BRRDecoder.decode(snapshot.data).samples
         player.onFinished = { [weak self] in
             Task { @MainActor in self?.isAuditioningOriginal = false }
@@ -123,7 +124,7 @@ struct SPCReplaceView: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Replace Track \(replacement.voice + 1)")
+                Text("Replace \(replacement.label)")
                     .font(.title2.bold())
                 Text("The song keeps playing. The new sample is heard the next time this track's sample plays.")
                     .font(.caption)

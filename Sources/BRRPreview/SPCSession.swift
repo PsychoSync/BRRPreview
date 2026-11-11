@@ -51,6 +51,9 @@ struct SPCVoiceState: Identifiable, Equatable {
     }
 
     var frequency: Double { Double(pitch) * Double(spcSampleRate) / 4096 }
+
+    /// A voice is sounding when it has both a pitch and an envelope.
+    var isSounding: Bool { pitch > 0 && envelope > 0 }
 }
 
 /// A playing SPC file. Voices are the DSP's eight hardware channels; each shows the sample it currently plays.
@@ -64,6 +67,7 @@ final class SPCSession: ObservableObject {
 
     private static let fftSize = 1024
     private static let spectrumFPS = 30.0
+    private static let frameDuration = 1 / spectrumFPS
 
     let url: URL
     @Published private(set) var songTitle = ""
@@ -73,6 +77,17 @@ final class SPCSession: ObservableObject {
     @Published private(set) var voices = (0..<Int(SPC_VOICE_COUNT)).map { SPCVoiceState.silent(index: $0) }
     @Published private(set) var mutedVoices: Set<Int> = []
     @Published private(set) var soloVoices: Set<Int> = []
+    /// Voices (default) or tracks. Track mode applies mute and solo to the sample each voice is playing.
+    @Published var viewMode: SPCViewMode = .voices {
+        didSet { pushMask() }
+    }
+    /// One entry per sample heard since the last restart, in first-heard order.
+    @Published private(set) var tracks: [SPCTrackState] = []
+    /// Keyed by sample index (SRCN), so a track's mute follows its sound across voices.
+    @Published private(set) var mutedTracks: Set<Int> = []
+    @Published private(set) var soloTracks: Set<Int> = []
+    /// Seconds of song time since the last restart. Paused time does not advance it.
+    @Published private(set) var playbackTime: Double = 0
     @Published var volume: Float = 0.8 {
         didSet { sourceNode.volume = volume }
     }
@@ -81,6 +96,8 @@ final class SPCSession: ObservableObject {
 
     /// The original SPC image with every RAM edit applied. Used to restart the song and to build a saved file.
     private(set) var patchedFile: [UInt8]
+    /// Extended ID666 tags from the loaded file. Saved files start from these, and the save sheet can change them.
+    var extendedTags = SPCExtendedTags()
     let handle = SPCEmuHandle()
 
     private let engine = AVAudioEngine()
@@ -97,6 +114,7 @@ final class SPCSession: ObservableObject {
             throw SPCError(message: "\(url.lastPathComponent) is not a valid SPC file (\(data.count) bytes).")
         }
         patchedFile = data
+        extendedTags = SPCExtendedTags(tail: Array(data.dropFirst(Self.fileSize)))
 
         let format = AVAudioFormat(standardFormatWithSampleRate: Double(Self.sampleRate), channels: 2)!
         let handle = self.handle
@@ -165,6 +183,8 @@ final class SPCSession: ObservableObject {
             errorMessage = error.localizedDescription
         }
         voices = (0..<Int(SPC_VOICE_COUNT)).map { SPCVoiceState.silent(index: $0) }
+        tracks = []
+        playbackTime = 0
     }
 
     // MARK: Mute and solo
@@ -187,18 +207,48 @@ final class SPCSession: ObservableObject {
         pushMask()
     }
 
-    /// Voices are silenced when muted, or when any voice is soloed and this one is not.
+    func toggleTrackMute(_ sourceIndex: Int) {
+        if mutedTracks.contains(sourceIndex) {
+            mutedTracks.remove(sourceIndex)
+        } else {
+            mutedTracks.insert(sourceIndex)
+        }
+        pushMask()
+    }
+
+    func toggleTrackSolo(_ sourceIndex: Int) {
+        if soloTracks.contains(sourceIndex) {
+            soloTracks.remove(sourceIndex)
+        } else {
+            soloTracks.insert(sourceIndex)
+        }
+        pushMask()
+    }
+
+    /// Builds the emulator mute mask for the current view mode.
     private func pushMask() {
         var mask = 0
-        for voice in 0..<Int(SPC_VOICE_COUNT) {
-            let soloed = soloVoices.isEmpty || soloVoices.contains(voice)
-            if mutedVoices.contains(voice) || !soloed {
-                mask |= 1 << voice
-            }
+        for voice in 0..<Int(SPC_VOICE_COUNT) where isSilenced(voice) {
+            mask |= 1 << voice
         }
         guard let emu = handle.emu else { return }
         spc_set_mute_mask(emu, Int32(mask))
     }
+
+    /// Voices are silenced when muted, or when any voice is soloed and this one is not.
+    /// In track mode the same rules apply to the sample each voice is playing, as of the last spectrum tick.
+    private func isSilenced(_ voice: Int) -> Bool {
+        switch viewMode {
+        case .voices:
+            let soloed = soloVoices.isEmpty || soloVoices.contains(voice)
+            return mutedVoices.contains(voice) || !soloed
+        case .tracks:
+            let source = voices[voice].sampleIndex
+            let soloed = soloTracks.isEmpty || soloTracks.contains(source)
+            return mutedTracks.contains(source) || !soloed
+        }
+    }
+
 
     // MARK: RAM access
 
@@ -232,14 +282,15 @@ final class SPCSession: ObservableObject {
     var directoryBase: Int { readDSP(0x5D) << 8 }
 
     /// The current state as an SPC file: this is a snapshot of the live song, not the start of the track.
-    func savedImage() throws -> [UInt8] {
+    /// The extended tags are appended after the image, as the format expects.
+    func savedImage(tags: SPCExtendedTags) throws -> [UInt8] {
         guard let emu = handle.emu else { throw SPCError(message: "No SPC is loaded.") }
         var out = [UInt8](repeating: 0, count: Self.fileSize)
         let written = spc_save(emu, &out, out.count)
         guard written == Self.fileSize else {
             throw SPCError(message: "Could not serialize the SPC state.")
         }
-        return out
+        return out + tags.serialized()
     }
 
     // MARK: Internals
@@ -311,6 +362,12 @@ final class SPCSession: ObservableObject {
                                  pitch: pitch,
                                  envelope: readDSP(base + 8) & 0x7F,
                                  bars: spectrum(emu, voice: voice))
+        }
+        let now = playbackTime
+        playbackTime += Self.frameDuration
+        SPCTrackTracker.update(&tracks, voices: voices, time: now, frameDuration: Self.frameDuration)
+        if viewMode == .tracks {
+            pushMask()
         }
     }
 

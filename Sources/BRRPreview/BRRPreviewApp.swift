@@ -19,6 +19,10 @@ struct BRRPreviewApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("Add Files…") {
+                    model.chooseFiles()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Add Folders…") {
                     model.chooseFolders()
                 }

@@ -12,16 +12,6 @@ struct ContentView: View {
             DetailView(model: model)
         }
         .navigationTitle("BRR Preview")
-        .toolbar {
-            ToolbarItem {
-                Button {
-                    model.chooseFolders()
-                } label: {
-                    Label("Add Folders", systemImage: "folder.badge.plus")
-                }
-                .help("Add one or more folders to browse for .brr files")
-            }
-        }
     }
 }
 
@@ -34,6 +24,28 @@ struct BrowserList: View {
                 BrowserRowView(model: model, row: row)
             }
         }
+        .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .top, alignment: .leading) {
+            VStack(spacing: 6) {
+                Button {
+                    model.chooseFiles()
+                } label: {
+                    Label("Add Files", systemImage: "doc.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .help("Add individual .brr, .spc, or audio files to the browser")
+
+                Button {
+                    model.chooseFolders()
+                } label: {
+                    Label("Add Folders", systemImage: "folder.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .help("Add one or more folders to browse for .brr files")
+            }
+            .buttonStyle(.bordered)
+            .padding(10)
+        }
         .safeAreaInset(edge: .bottom, alignment: .leading) {
             if let spc = model.spc {
                 SPCTransportView(session: spc)
@@ -42,11 +54,32 @@ struct BrowserList: View {
         }
         .overlay {
             if model.roots.isEmpty {
-                Text("Add folders containing .brr or audio files")
+                Text("Add files or folders containing .brr or audio files")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding()
             }
+        }
+        .background {
+            BrowserBackdrop()
+                .ignoresSafeArea()
+        }
+    }
+}
+
+/// Faint artwork stretched across the whole browser section. Loaded from the app bundle, so it is absent under `swift run`.
+struct BrowserBackdrop: View {
+    private static let image: NSImage? = Bundle.main
+        .url(forResource: "Background", withExtension: "png")
+        .flatMap { NSImage(contentsOf: $0) }
+
+    var body: some View {
+        if let image = Self.image {
+            Image(nsImage: image)
+                .resizable()
+                .opacity(0.15)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -91,6 +124,13 @@ struct BrowserRowView: View {
                 .onDrag {
                     NSItemProvider(contentsOf: node.url) ?? NSItemProvider()
                 }
+                .contextMenu {
+                    if row.depth == 0 {
+                        Button("Remove File") {
+                            model.removeFolder(node)
+                        }
+                    }
+                }
             }
         }
         .padding(.leading, CGFloat(row.depth) * 14)
@@ -127,7 +167,17 @@ struct DetailView: View {
 
                 PitchInfoView(model: model)
 
-                PianoView(model: model)
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Guess Instrument") {
+                        model.guessInstrument()
+                    }
+                    .help("Heuristic guess from the envelope and spectrum. It is not a trained model.")
+                    if let guess = model.instrumentGuess {
+                        InstrumentGuessView(guess: guess)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
                     .frame(height: 96)
 
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
@@ -179,6 +229,22 @@ struct DetailView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+struct InstrumentGuessView: View {
+    let guess: InstrumentGuess
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(format: "Guess: %@ (%.0f%%)", guess.instrument.displayName, guess.confidence * 100))
+                .fontWeight(.medium)
+            Text(guess.reasons.joined(separator: " · "))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .font(.callout)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

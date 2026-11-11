@@ -12,6 +12,7 @@ app:
 	cp Info.plist "$(APP_BUNDLE)/Contents/Info.plist"
 	mkdir -p "$(APP_BUNDLE)/Contents/Resources"
 	cp Resources/AppIcon.icns "$(APP_BUNDLE)/Contents/Resources/AppIcon.icns"
+	cp Resources/Background.png "$(APP_BUNDLE)/Contents/Resources/Background.png"
 	codesign --force --sign - "$(APP_BUNDLE)"
 
 run: app

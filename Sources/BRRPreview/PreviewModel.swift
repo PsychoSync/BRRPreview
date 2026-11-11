@@ -27,7 +27,10 @@ final class PreviewModel: ObservableObject {
     @Published private(set) var roots: [BrowserNode] = []
     /// Paths of folders currently expanded in the browser.
     @Published private(set) var expandedFolders: Set<String> = []
-    @Published private(set) var selected: LoadedSample?
+    @Published private(set) var selected: LoadedSample? {
+        didSet { instrumentGuess = nil }
+    }
+    @Published private(set) var instrumentGuess: InstrumentGuess?
     /// Waveform editor for the audio file being converted. Shown in place of the piano while set.
     @Published private(set) var editor: WaveEditor?
     /// The SPC song being played. Replaces the piano and BRR detail views while set.
@@ -68,7 +71,13 @@ final class PreviewModel: ObservableObject {
             ?? UserDefaults.standard.string(forKey: Self.legacyFolderKey).map { [$0] }
             ?? []
         for path in savedPaths {
-            appendRoot(URL(fileURLWithPath: path, isDirectory: true))
+            var isDirectory: ObjCBool = true
+            // Paths that no longer exist restore as folders, as before, so the entry stays visible and removable.
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
+                appendRoot(URL(fileURLWithPath: path), isDirectory: isDirectory.boolValue)
+            } else {
+                appendRoot(URL(fileURLWithPath: path, isDirectory: true), isDirectory: true)
+            }
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             let handled = MainActor.assumeIsolated { () -> Bool in
@@ -87,7 +96,20 @@ final class PreviewModel: ObservableObject {
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            appendRoot(url)
+            appendRoot(url, isDirectory: true)
+        }
+        saveFolders()
+    }
+
+    func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls where BrowserNode.isSupportedFile(url) {
+            appendRoot(url, isDirectory: false)
         }
         saveFolders()
     }
@@ -124,11 +146,13 @@ final class PreviewModel: ObservableObject {
         return rows
     }
 
-    private func appendRoot(_ url: URL) {
+    private func appendRoot(_ url: URL, isDirectory: Bool) {
         let url = url.standardizedFileURL
         guard !roots.contains(where: { $0.url.path == url.path }) else { return }
-        roots.append(BrowserNode(url: url, isDirectory: true))
-        expandedFolders.insert(url.path)
+        roots.append(BrowserNode(url: url, isDirectory: isDirectory))
+        if isDirectory {
+            expandedFolders.insert(url.path)
+        }
     }
 
     private func saveFolders() {
@@ -212,6 +236,16 @@ final class PreviewModel: ObservableObject {
             selected = nil
             errorMessage = "Couldn't read \(node.name): \(error.localizedDescription)"
         }
+    }
+
+    /// Runs the heuristic instrument classifier on the selected BRR sample.
+    func guessInstrument() {
+        guard let selected else { return }
+        instrumentGuess = InstrumentClassifier.guess(
+            samples: selected.decoded.samples,
+            sampleRate: BRRDecoder.sampleRate,
+            pitchHz: detectedFrequency,
+            hasLoop: selected.decoded.loopStart != nil || selected.decoded.hasLoopFlag)
     }
 
     func togglePlayback() {
@@ -421,11 +455,25 @@ final class PreviewModel: ObservableObject {
     func beginReplacement(voice: Int) {
         guard let spc else { return }
         guard let snapshot = spc.snapshot(voice: voice) else {
-            spc.errorMessage = "Track \(voice + 1) has no sample to replace."
+            spc.errorMessage = "Voice \(voice + 1) has no sample to replace."
             return
         }
+        beginReplacement(spc, snapshot: snapshot, label: "Voice \(voice + 1)")
+    }
+
+    /// Replacing by track changes the directory entry, so every voice playing this sample picks up the new sound.
+    func beginReplacement(track: SPCTrackState) {
+        guard let spc else { return }
+        guard let snapshot = spc.snapshot(sourceIndex: track.sourceIndex) else {
+            spc.errorMessage = "Track \(track.number) has no sample to replace."
+            return
+        }
+        beginReplacement(spc, snapshot: snapshot, label: "Track \(track.number)")
+    }
+
+    private func beginReplacement(_ spc: SPCSession, snapshot: SPCSampleSnapshot, label: String) {
         cancelReplacement()
-        replacement = SPCReplacement(session: spc, snapshot: snapshot)
+        replacement = SPCReplacement(session: spc, snapshot: snapshot, label: label)
     }
 
     func cancelReplacement() {
@@ -441,7 +489,7 @@ final class PreviewModel: ObservableObject {
             if result.relocated { notes.append("moved to free RAM") }
             if result.truncated { notes.append("truncated to fit") }
             let suffix = notes.isEmpty ? "" : " (\(notes.joined(separator: ", ")))"
-            spc?.statusMessage = "Replaced track \(replacement.voice + 1)\(suffix)."
+            spc?.statusMessage = "Replaced \(replacement.label.lowercased())\(suffix)."
             cancelReplacement()
         } catch {
             replacement.errorMessage = error.localizedDescription
@@ -461,29 +509,67 @@ final class PreviewModel: ObservableObject {
     func extractSample(voice: Int) {
         guard let spc else { return }
         guard let snapshot = spc.snapshot(voice: voice) else {
-            spc.errorMessage = "Track \(voice + 1) has no sample to extract."
+            spc.errorMessage = "Voice \(voice + 1) has no sample to extract."
             return
         }
+        saveSample(spc, snapshot, track: nil, label: "voice \(voice + 1)",
+                   fileName: String(format: "voice%d-%02X.brr", voice + 1, snapshot.sourceIndex))
+    }
+
+    func extractSample(track: SPCTrackState) {
+        guard let spc else { return }
+        guard let snapshot = spc.snapshot(sourceIndex: track.sourceIndex) else {
+            spc.errorMessage = "Track \(track.number) has no sample to extract."
+            return
+        }
+        saveSample(spc, snapshot, track: track, label: "track \(track.number)",
+                   fileName: String(format: "track%02d-%02X.brr", track.number, snapshot.sourceIndex))
+    }
+
+    private func saveSample(_ spc: SPCSession, _ snapshot: SPCSampleSnapshot, track: SPCTrackState?,
+                            label: String, fileName: String) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = String(format: "voice%d-%02X.brr", voice + 1, snapshot.sourceIndex)
+        panel.nameFieldStringValue = fileName
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let written = try spc.extract(snapshot, to: url)
+            let written = try spc.extract(snapshot, to: url, track: track)
             spc.errorMessage = nil
             spc.statusMessage = "Extracted \(written.lastPathComponent) and its metadata."
         } catch {
-            spc.errorMessage = "Couldn't extract track \(voice + 1): \(error.localizedDescription)"
+            spc.errorMessage = "Couldn't extract \(label): \(error.localizedDescription)"
         }
     }
 
-    /// Writes the emulator's current state, so the saved SPC reflects any replaced samples.
-    func saveSPC() {
+    /// Writes every distinct sample in the song to a folder the user picks.
+    func extractAllSamples() {
+        guard let spc else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Extract"
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        do {
+            let count = try spc.extractAll(to: folder)
+            spc.errorMessage = nil
+            spc.statusMessage = count == 0
+                ? "No samples found in the song."
+                : "Extracted \(count) sample\(count == 1 ? "" : "s") to \(folder.lastPathComponent)."
+        } catch {
+            spc.errorMessage = "Couldn't extract samples: \(error.localizedDescription)"
+        }
+    }
+
+
+    /// Writes the emulator's current state, so the saved SPC reflects any replaced samples. `tags` come from the save sheet.
+    func saveSPC(tags: SPCExtendedTags) {
         guard let spc else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = spc.url.lastPathComponent
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try Data(spc.savedImage()).write(to: url, options: .atomic)
+            try Data(spc.savedImage(tags: tags)).write(to: url, options: .atomic)
+            spc.extendedTags = tags
             spc.errorMessage = nil
             spc.statusMessage = "Saved \(url.lastPathComponent)."
         } catch {
