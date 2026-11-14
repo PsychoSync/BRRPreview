@@ -80,16 +80,6 @@ final class SPCSampleTests: XCTestCase {
         XCTAssertTrue(endHeader & 0x01 != 0, "Last block of a chain must carry END")
     }
 
-    func testGuessInstrumentClassifiesLiveSample() throws {
-        let session = try openFixture()
-        defer { session.shutdown() }
-        let snapshot = try firstSounding(session)
-
-        let guess = try XCTUnwrap(session.guessInstrument(sourceIndex: snapshot.sourceIndex))
-        XCTAssertEqual(guess.features.pitchHz, snapshot.frequency)
-        XCTAssertEqual(guess.features.hasLoop, snapshot.loopBlock != nil)
-    }
-
     func testExtractWritesBRRAndMetadata() throws {
         let session = try openFixture()
         defer { session.shutdown() }
@@ -109,7 +99,7 @@ final class SPCSampleTests: XCTestCase {
         XCTAssertTrue(text.contains("Sample index (SRCN):"))
     }
 
-    func testExtractAllWritesOneFilePerDistinctSample() throws {
+    func testExtractAllWritesOneFilePerUsedSampleWithoutMovingLivePlayback() async throws {
         let session = try openFixture()
         defer { session.shutdown() }
 
@@ -117,12 +107,14 @@ final class SPCSampleTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
 
-        let count = try session.extractAll(to: folder)
+        let before = try session.savedImage(tags: session.extendedTags)
+        let count = try await session.extractAll(to: folder, duration: 3)
         let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
         let brrCount = files.filter { $0.hasSuffix(".brr") }.count
         XCTAssertGreaterThan(count, 0, "The fixture song should contain at least one sample")
         XCTAssertEqual(brrCount, count)
         XCTAssertEqual(files.filter { $0.hasSuffix(".txt") }.count, count)
+        XCTAssertEqual(try session.savedImage(tags: session.extendedTags), before)
     }
 
     func testSameAudioReplacementKeepsSlotAndData() throws {

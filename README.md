@@ -5,21 +5,21 @@ audio into BRR. Add one or more folders, expand them in the sidebar, and click a
 `.brr` file to play it back tuned to its note. The detail pane shows a waveform, the
 detected pitch, and a piano keyboard. Click an audio file to open the converter.
 
+Download the [latest universal macOS release](https://github.com/PsychoSync/BRRPreview/releases/latest).
+The same app runs on Intel and Apple Silicon Macs with macOS 13 or later.
+All audio decoders and the SPC emulator are bundled; no extra dependencies are needed.
+
 - **Add Files…** (⇧⌘O) adds individual BRR, audio, or SPC files to the browser.
   **Add Folders…** (⌘O) adds one or more folders. Each folder appears as a tree, so a
   folder of instrument subfolders can be auditioned directly. Folders expand and
-  collapse on click. Right-click a top-level file or folder and choose **Remove File**
+  collapse on click. Hover a top-level folder and click its remove icon to close it
+  without deleting files. Right-click a top-level file or folder and choose **Remove File**
   or **Remove Folder** to drop it. The list is remembered between launches.
 - **Pitch**: BRR files don't store a pitch, so the app estimates the sample's
   fundamental with autocorrelation and transposes it so the sample's note sounds.
   The note comes from the filename's trailing note name (e.g. `Eighty Pad C5` → C5),
   or C4 if the name has none. Samples with no clear pitch (drums, noise) play at the
   native rate with that note as the reference.
-- **Guess Instrument**: a button under the sample that guesses its instrument type
-  (drum, pluck, bass, lead, pad, or noise) from the envelope (attack, decay, and
-  whether it sustains or loops) and the spectrum (centroid and flatness). It is a
-  heuristic, not a trained model, so treat the result as a hint. The result also lists
-  the measurements behind it.
 - **Piano keys**: while the app is focused, the keyboard plays notes. Q through P
   play the white keys, and 2 3 5 6 7 0 9 play the black keys. The octave starts at
   the octave of the current note. Mouse clicks on the on-screen keys work too.
@@ -86,6 +86,10 @@ core, bundled in `Sources/CSpcEmu/`.
   of the sidebar while an SPC is open. On macOS 26 and later they use the system glass
   effect; on earlier systems they fall back to a translucent material. Space plays or pauses. ↑/↓ move to the previous
   or next file. The piano keys are off in SPC mode.
+  Clicking a BRR or audio file leaves the song playing while you audition the sample.
+  **Go to spc** in the transport or **← Go back to playback** above the sample returns
+  to the same song without restarting it. On the sample page, keyboard shortcuts
+  control the sample; the transport continues to control the song.
 - **Voices / Tracks**: the picker at the top of the SPC view switches between two modes.
   *Voices* lists the SNES's 8 hardware voices, each with a realtime spectrum, its sample
   number (SRCN), and its note. M and S mute or solo a voice.
@@ -95,18 +99,33 @@ core, bundled in `Sources/CSpcEmu/`.
   M and S mute or solo a track. Mute and solo follow the sound, so a muted sample is
   silenced on whichever voice it plays next. The mute can leak for up to about 33 ms
   when a muted sample starts.
-- **Guess**: a button on each voice and track that runs the same heuristic on its
-  sample, read from the song's live RAM. The guess disappears once that row's sample
-  changes. It is a hint, not a trained model.
+- **Instrument name**: enter a custom name above a track's Extract and Replace buttons.
+  Both extraction actions use it as the sample filename. Names stay with their SRCN
+  while this song is open, including after Stop/restart; they are not embedded in SPC files.
 - **Extract…** writes a voice's or track's sample as a `.brr` file with its loop point.
   A `.txt` file with the same name holds the metadata: the SRCN, loop, detected pitch,
   directory address, and the voice or track number. Voice numbers are 1-based.
-- **Extract All…** writes every distinct sample in the song's directory to a folder you
-  choose. Files are named `SRCN_XX_XXXX.brr`, with a matching `.txt` for each.
-- **Replace…** opens the original sample and a new one side by side. Click a sample in the
-  browser to preview it without choosing it. Drop a sample onto the new-sample area, or
-  choose one with the button. Audio files and BRR files both work as the new sample. Pick the pitch mode, fine
-  tune, and what to do if the new sample is longer than the original (refuse, truncate,
+- **Extract All…** scans from the start in a separate emulator without interrupting playback.
+  The editable scan length defaults to 12 minutes (maximum 60). Only BRR samples that
+  produce audible voice output in that interval are exported, including instruments
+  introduced later; unused directory entries, silent voices and noise-only voices are excluded.
+  Samples are captured when heard, preserving their BRR data and loop even if RAM changes later.
+  Identical sounds with identical loops are exported once. Custom names are preferred;
+  otherwise files are named `SRCN_XX_XXXX.brr`, with a matching `.txt` for each.
+  Unsafe filename characters are replaced, and numeric suffixes prevent overwriting
+  existing files or collisions between names. Increase the scan length for longer songs.
+- **Replace…** shows selectable Original and New sample sections, with one shared piano
+  between them. The selected section receives the piano and keyboard notes (Q–P,
+  number keys, and left/right octave arrows). Each has its own Loop checkbox, Hold note
+  checkbox, and preview volume knob. Loop starts enabled when the sample has a loop.
+  Hold note latches a note so you can adjust it hands-free; held notes can continue while
+  you select the other section. Monitor volumes do not change the exported sample.
+  Click a browser sample to preview once without choosing it, or press and hold to
+  sustain it with its loop until release. Drop it onto the new-sample area, or choose
+  one with the button, to select it. Audio and BRR files are accepted.
+  Editing tools are arranged horizontally. Pitch mode, coarse pitch (-24 to +24 semitones),
+  and fine tune (-100 to +100 cents) affect the new preview immediately and are included
+  when applied. Choose what to do if the new sample is longer than the original (refuse, truncate,
   or relocate). Apply rewrites the sample in the song's RAM. The change is heard the
   next time that track plays a note, because the emulator keeps the old sample until
   then. Relocate moves the sample to a free area of RAM. That path is heuristic and
@@ -129,8 +148,9 @@ make app
 open build/BRRPreview.app
 ```
 
-The build explicitly targets `x86_64` to match the other apps in `macOS/`. To
-build and launch in one step, run `make run`. Run the decoder tests with
+The build targets both `x86_64` (Intel) and `arm64` (Apple Silicon). To
+build and launch in one step, run `make run`. Create the universal release ZIP with
+`make release`. Run the tests with
 `make test`. The app icon is `Resources/AppIcon.icns`, which `make app` copies into the bundle. The faint
 background behind the file browser is `Resources/Background.png`, also copied by `make app`. It
 only appears in the built `.app`, not under `swift run`.

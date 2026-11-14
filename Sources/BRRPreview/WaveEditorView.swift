@@ -7,20 +7,37 @@ struct WaveEditorView: View {
     @ObservedObject var editor: WaveEditor
     /// Hidden when the editor feeds an SPC sample replacement, which always converts at the native rate.
     var showsExportControls: Bool = true
+    var showsPlaybackControls: Bool = true
+    var returnToPlayback: (() -> Void)? = nil
     @State private var dragStart: Int?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(editor.sourceURL.lastPathComponent)
-                .font(.title2.bold())
-            Text(editor.sourceURL.deletingLastPathComponent().path)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: showsExportControls ? 12 : 6) {
+            if showsExportControls {
+                HStack {
+                    Text(editor.sourceURL.lastPathComponent)
+                        .font(.title2.bold())
+                    Spacer()
+                    if let returnToPlayback {
+                        Button(action: returnToPlayback) {
+                            Label("Go back to playback", systemImage: "arrow.left")
+                        }
+                    }
+                }
+                Text(editor.sourceURL.deletingLastPathComponent().path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
 
             waveform
-                .frame(height: 160)
+                .frame(height: showsExportControls ? 160 : 75)
                 .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .topTrailing) {
+                    if !showsExportControls && editor.isConverting {
+                        ProgressView().controlSize(.small).padding(6)
+                    }
+                }
 
             Text(selectionDescription)
                 .font(.callout)
@@ -36,9 +53,9 @@ struct WaveEditorView: View {
 
             editButtons
 
-            playbackRow
+            if showsPlaybackControls { playbackRow }
 
-            stats
+            if showsExportControls { stats }
 
             if let error = editor.errorMessage {
                 Text(error).foregroundStyle(.red)
@@ -47,7 +64,7 @@ struct WaveEditorView: View {
                 Text(status).foregroundStyle(.secondary)
             }
 
-            Spacer(minLength: 0)
+            if showsExportControls { Spacer(minLength: 0) }
         }
     }
 
@@ -135,29 +152,44 @@ struct WaveEditorView: View {
     // MARK: - Controls
 
     private var editButtons: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button("Crop", action: editor.crop)
-                    .disabled(editor.selection == nil)
-                Button("Cut", action: editor.cut)
-                    .disabled(editor.selection == nil)
-                Button("Reverse", action: editor.reverse)
-                    .disabled(editor.selection == nil)
-                Button("Fade In", action: editor.fadeIn)
-                Button("Fade Out", action: editor.fadeOut)
-            }
-            HStack(spacing: 8) {
-                Button("Trim Silence", action: editor.trimSilence)
-                Button("Normalize", action: editor.normalize)
-                Button("Clear Loop", action: editor.clearLoop)
-                    .disabled(editor.sample.loopStart == nil)
-                Button("Undo", action: editor.undo)
-                    .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!editor.canUndo)
+        Group {
+            if showsExportControls {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) { primaryEditButtons }
+                    HStack(spacing: 8) { otherEditButtons }
+                }
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        primaryEditButtons
+                        otherEditButtons
+                    }
+                }
             }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+
+    private var primaryEditButtons: some View {
+        Group {
+            Button("Crop", action: editor.crop).disabled(editor.selection == nil)
+            Button("Cut", action: editor.cut).disabled(editor.selection == nil)
+            Button("Reverse", action: editor.reverse).disabled(editor.selection == nil)
+            Button("Fade In", action: editor.fadeIn)
+            Button("Fade Out", action: editor.fadeOut)
+        }
+    }
+
+    private var otherEditButtons: some View {
+        Group {
+            Button("Trim Silence", action: editor.trimSilence)
+            Button("Normalize", action: editor.normalize)
+            Button("Clear Loop", action: editor.clearLoop).disabled(editor.sample.loopStart == nil)
+            Button("Undo", action: editor.undo)
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!editor.canUndo)
+        }
     }
 
     private var playbackRow: some View {

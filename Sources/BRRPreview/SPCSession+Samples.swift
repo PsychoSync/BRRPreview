@@ -11,12 +11,15 @@ enum OversizePolicy: String, CaseIterable, Identifiable {
 
 struct ReplacementOptions: Equatable {
     var pitchMode: SampleReplacement.PitchMode = .matchOriginal
+    var semitones: Double = 0
     var cents: Double = 0
     var oversize: OversizePolicy = .refuse
+
+    var totalCents: Double { semitones * 100 + cents }
 }
 
 /// One track's sample as it sits in live SPC RAM.
-struct SPCSampleSnapshot {
+struct SPCSampleSnapshot: Sendable {
     /// The voice the sample was read from. Nil when read by track, since a track spans several voices.
     let voice: Int?
     let sourceIndex: Int
@@ -44,8 +47,6 @@ struct ReplacementResult {
 extension SPCSession {
     private static let blockSize = BRRDecoder.blockSize
     private static let directoryEntries = 64
-    /// Samples below this address sit in the driver's own RAM and are not song samples.
-    private static let firstSampleAddress = 0x0200
 
     /// Reads the sample that voice `voice` is currently pointing at, from live RAM.
     func snapshot(voice: Int) -> SPCSampleSnapshot? {
@@ -75,16 +76,6 @@ extension SPCSession {
                                  loopBlock: loopBlock, frequency: frequency)
     }
 
-    /// Classifies the sample in directory slot `sourceIndex`, read from live RAM.
-    func guessInstrument(sourceIndex: Int) -> InstrumentGuess? {
-        guard let snapshot = snapshot(sourceIndex: sourceIndex) else { return nil }
-        return InstrumentClassifier.guess(
-            samples: BRRDecoder.decode(snapshot.data).samples,
-            sampleRate: Double(BRRDecoder.sampleRate),
-            pitchHz: snapshot.frequency,
-            hasLoop: snapshot.loopBlock != nil)
-    }
-
     /// The snapshot's audio as an editable sample, for the original side of the replacement page.
     func originalSample(_ snapshot: SPCSampleSnapshot) -> EditableSample {
         let decoded = BRRDecoder.decode(snapshot.data)
@@ -104,22 +95,57 @@ extension SPCSession {
         return sidecar
     }
 
-    /// Writes every distinct sample in the song's directory into `folder`, one BRR and sidecar each.
-    /// Returns how many samples were written.
-    func extractAll(to folder: URL) throws -> Int {
-        var seenStarts = Set<Int>()
+    func extractAll(to folder: URL, duration: Double = 720) async throws -> Int {
+        let image = patchedFile
+        let scan = Task.detached(priority: .userInitiated) {
+            try SPCSampleScanner.scan(image: image, duration: duration)
+        }
+        let snapshots = try await withTaskCancellationHandler {
+            try await scan.value
+        } onCancel: {
+            scan.cancel()
+        }
+        return try extractUsed(snapshots, to: folder)
+    }
+
+    /// Content and loop point identify a sound, not its directory slot or RAM address.
+    func extractUsed(_ snapshots: [SPCSampleSnapshot], to folder: URL) throws -> Int {
+        var seenFiles = Set<Data>()
         var written = 0
-        for sourceIndex in 0..<Self.directoryEntries {
-            guard let snapshot = snapshot(sourceIndex: sourceIndex),
-                  snapshot.start >= Self.firstSampleAddress,
-                  seenStarts.insert(snapshot.start).inserted else {
-                continue
+        let ordered = snapshots.sorted {
+            let leftNamed = !(sampleNames[$0.sourceIndex] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let rightNamed = !(sampleNames[$1.sourceIndex] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return leftNamed && !rightNamed
+        }
+        for snapshot in ordered {
+            try Task.checkCancellation()
+            let file = Data(BRREncoder.file(.init(data: snapshot.data, blockCount: snapshot.blockCount,
+                                                 loopBlock: snapshot.loopBlock)))
+            guard seenFiles.insert(file).inserted else { continue }
+            let fallback = String(format: "SRCN_%02X_%04X", snapshot.sourceIndex, snapshot.start)
+            let base = sampleFileStem(sourceIndex: snapshot.sourceIndex, fallback: fallback)
+            var name = base
+            var suffix = 2
+            while ["brr", "txt"].contains(where: {
+                FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).appendingPathExtension($0).path)
+            }) {
+                name = "\(base)-\(suffix)"
+                suffix += 1
             }
-            let name = String(format: "SRCN_%02X_%04X.brr", sourceIndex, snapshot.start)
-            _ = try extract(snapshot, to: folder.appendingPathComponent(name))
+            _ = try extract(snapshot, to: folder.appendingPathComponent(name).appendingPathExtension("brr"),
+                            track: tracks.first { $0.sourceIndex == snapshot.sourceIndex })
             written += 1
         }
         return written
+    }
+
+    func sampleFileStem(sourceIndex: Int, fallback: String) -> String {
+        let name = (sampleNames[sourceIndex] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let invalid = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:\\"))
+        var safe = name.components(separatedBy: invalid).joined(separator: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        if safe.lowercased().hasSuffix(".brr") { safe.removeLast(4) }
+        return safe.isEmpty ? fallback : String(safe.prefix(120))
     }
 
     private func metadataText(for snapshot: SPCSampleSnapshot, track: SPCTrackState?) -> String {
@@ -133,6 +159,9 @@ extension SPCSession {
             "Game: \(gameTitle)",
             "Author: \(authorName)",
         ]
+        if let name = sampleNames[snapshot.sourceIndex], !name.isEmpty {
+            lines.append("Custom name: \(name)")
+        }
         if let track {
             lines.append("Track: \(track.number)")
             lines.append("Voices used: " + track.voicesUsed.sorted().map { "\($0 + 1)" }.joined(separator: ", "))
@@ -173,7 +202,7 @@ extension SPCSession {
             newFrequency: newFrequency,
             originalFrequency: snapshot.frequency,
             mode: options.pitchMode,
-            cents: options.cents
+            cents: options.totalCents
         )
         let adjusted = EditableSample(samples: sample.samples, sourceRate: rate, loopStart: sample.loopStart)
         var encoding = BRRConverter.convert(adjusted, outputRate: Double(BRRDecoder.sampleRate)).encoding

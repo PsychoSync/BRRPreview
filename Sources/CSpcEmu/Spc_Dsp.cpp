@@ -267,6 +267,10 @@ void Spc_Dsp::run( int clock_count )
 				if ( kon_delay == 4 )
 				{
 					v->brr_addr   = SAMPLE_PTR( 0 );
+					v->sample_source = VREG(v_regs,srcn);
+					v->sample_start = v->brr_addr;
+					v->sample_loop = SAMPLE_PTR( 1 );
+					v->sample_directory = REG(dir) * 0x100 + v->sample_source * 4;
 					v->brr_offset = 1;
 					v->buf_pos    = v->buf;
 					brr_header    = 0; // header is ignored on this sample
@@ -341,6 +345,15 @@ void Spc_Dsp::run( int clock_count )
 				pmon_input = output;
 				m.tap_cur [v - m.voices] = output;
 				VREG(v_regs,outx) = (uint8_t) (output >> 8);
+				if ( sample_observer && !v->sample_observed && output && pitch &&
+					((v->volume [0] && REG(mvoll)) || (v->volume [1] && REG(mvolr)) ||
+						((REG(eon) & vbit) && !(REG(flg) & 0x20) && (REG(evoll) || REG(evolr)))) &&
+					!(REG(flg) & 0xC0) && !(REG(non) & vbit) )
+				{
+					sample_observer( sample_observer_context, v->sample_source, v->sample_directory,
+						v->sample_start, v->sample_loop );
+					v->sample_observed = true;
+				}
 			}
 
 			// Soft reset or end of sample
@@ -360,6 +373,7 @@ void Spc_Dsp::run( int clock_count )
 				if ( m.kon & vbit )
 				{
 					v->kon_delay = 5;
+					v->sample_observed = false;
 					v->env_mode  = env_attack;
 					REG(endx) &= ~vbit;
 				}

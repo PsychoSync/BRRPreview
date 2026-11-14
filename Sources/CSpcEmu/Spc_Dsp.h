@@ -92,6 +92,12 @@ public:
 	// voices still record output. Copies the most recent `count` values, oldest first.
 	enum { tap_size = 2048 };
 	void copy_voice_tap( int voice, sample_t* out, int count ) const;
+	typedef void (*sample_observer_t)( void*, int, int, int, int );
+	void set_sample_observer( sample_observer_t observer, void* context )
+	{
+		sample_observer = observer;
+		sample_observer_context = context;
+	}
 public:
 	BLARGG_DISABLE_NOTHROW
 
@@ -112,6 +118,11 @@ public:
 		int hidden_env;         // used by GAIN mode 7, very obscure quirk
 		int volume [2];         // copy of volume from DSP registers, with surround disabled
 		int enabled;            // -1 if enabled, 0 if muted
+		bool sample_observed;
+		int sample_source;
+		int sample_start;
+		int sample_loop;
+		int sample_directory;
 	};
 private:
 	struct state_t
@@ -157,6 +168,8 @@ private:
 		int tap_pos;
 	};
 	state_t m;
+	sample_observer_t sample_observer = nullptr;
+	void* sample_observer_context = nullptr;
 
 	void init_counter();
 	void run_counter( int );

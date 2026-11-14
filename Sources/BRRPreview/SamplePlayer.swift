@@ -3,10 +3,12 @@ import BRRCore
 
 enum SamplePlayerError: LocalizedError {
     case bufferUnavailable
+    case invalidRate
 
     var errorDescription: String? {
         switch self {
         case .bufferUnavailable: return "Could not allocate an audio buffer."
+        case .invalidRate: return "The playback rate must be finite and greater than zero."
         }
     }
 }
@@ -14,6 +16,9 @@ enum SamplePlayerError: LocalizedError {
 @MainActor
 final class SamplePlayer {
     var onFinished: (() -> Void)?
+    var volume: Float = 1 {
+        didSet { node.volume = volume }
+    }
 
     /// Varispeed range supported by AVAudioUnitVarispeed.
     static let rateRange = 0.25...4.0
@@ -24,6 +29,10 @@ final class SamplePlayer {
     private let format: AVAudioFormat
     /// Bumped on every play and stop so stale completion callbacks are ignored.
     private var generation = 0
+    private var currentSamples: [Int16] = []
+    private var currentLoopStart: Int?
+    private var currentLoop = false
+    private var rateScale = 1.0
 
     init() {
         format = AVAudioFormat(standardFormatWithSampleRate: BRRDecoder.sampleRate, channels: 1)!
@@ -36,20 +45,34 @@ final class SamplePlayer {
     /// Plays at `rate` times the native 32 kHz speed, which also scales pitch by the same factor.
     /// With `loop`, repeats from `loopStart` to the end, or the whole sample when there is no loop point.
     func play(_ samples: [Int16], loopStart: Int?, loop: Bool, rate: Double) throws {
+        guard rate.isFinite, rate > 0 else { throw SamplePlayerError.invalidRate }
+        currentSamples = samples
+        currentLoopStart = loopStart
+        currentLoop = loop
         generation += 1
         let token = generation
         node.stop()
-        varispeed.rate = Float(min(max(rate, Self.rateRange.lowerBound), Self.rateRange.upperBound))
+        rateScale = Self.rateRange.contains(rate) ? 1 : pow(2, floor(log2(rate)))
+        var pcm = samples
+        var loopPoint = loopStart
+        if rateScale != 1 {
+            pcm = Resampler.resample(samples.map { Float($0) / 32768 },
+                                     from: BRRDecoder.sampleRate * rateScale, to: BRRDecoder.sampleRate)
+                .map { Int16(clamping: Int(($0 * 32768).rounded())) }
+            loopPoint = loopStart.map { Int(Double($0) / rateScale) }
+        }
+        guard !pcm.isEmpty else { throw SamplePlayerError.bufferUnavailable }
+        varispeed.rate = Float(rate / rateScale)
         if !engine.isRunning {
             engine.prepare()
             try engine.start()
         }
 
         var intro: ArraySlice<Int16> = []
-        var body = samples[...]
-        if loop, let loopStart, loopStart < samples.count {
-            intro = samples[..<loopStart]
-            body = samples[loopStart...]
+        var body = pcm[...]
+        if loop, let loopPoint, loopPoint >= 0, loopPoint < pcm.count {
+            intro = pcm[..<loopPoint]
+            body = pcm[loopPoint...]
         }
         if !intro.isEmpty {
             node.scheduleBuffer(try makeBuffer(intro), at: nil, options: [], completionHandler: nil)
@@ -61,6 +84,16 @@ final class SamplePlayer {
             }
         }
         node.play()
+    }
+
+    /// Changes pitch without restarting a held note unless the resampling range changes.
+    func setRate(_ rate: Double) throws {
+        guard rate.isFinite, rate > 0 else { throw SamplePlayerError.invalidRate }
+        if Self.rateRange.contains(rate / rateScale) {
+            varispeed.rate = Float(rate / rateScale)
+        } else {
+            try play(currentSamples, loopStart: currentLoopStart, loop: currentLoop, rate: rate)
+        }
     }
 
     func stop() {

@@ -19,7 +19,7 @@ final class WaveEditor: ObservableObject {
     @Published private(set) var conversion: BRRConversion?
     @Published private(set) var isConverting = false
     /// The exported file decoded again, so playback includes its loop and rate.
-    private(set) var previewDecoded: BRRDecoder.Result?
+    @Published private(set) var previewDecoded: BRRDecoder.Result?
     @Published var outputRate: Double = BRRConverter.defaultOutputRate {
         didSet {
             guard outputRate != oldValue else { return }

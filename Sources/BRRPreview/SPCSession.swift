@@ -83,6 +83,8 @@ final class SPCSession: ObservableObject {
     }
     /// One entry per sample heard since the last restart, in first-heard order.
     @Published private(set) var tracks: [SPCTrackState] = []
+    @Published var sampleNames: [Int: String] = [:]
+    @Published var isExtracting = false
     /// Keyed by sample index (SRCN), so a track's mute follows its sound across voices.
     @Published private(set) var mutedTracks: Set<Int> = []
     @Published private(set) var soloTracks: Set<Int> = []

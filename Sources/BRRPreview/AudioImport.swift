@@ -68,7 +68,7 @@ enum AudioImport {
         }
         return EditableSample(samples: decoded.samples.map { Float($0) / 32768 },
                               sourceRate: BRRDecoder.sampleRate,
-                              loopStart: decoded.loopStart)
+                              loopStart: decoded.loopStart ?? (decoded.hasLoopFlag ? 0 : nil))
     }
 
     /// AVFoundation can't read Ogg Vorbis, so those files go through stb_vorbis.

@@ -27,14 +27,12 @@ final class PreviewModel: ObservableObject {
     @Published private(set) var roots: [BrowserNode] = []
     /// Paths of folders currently expanded in the browser.
     @Published private(set) var expandedFolders: Set<String> = []
-    @Published private(set) var selected: LoadedSample? {
-        didSet { instrumentGuess = nil }
-    }
-    @Published private(set) var instrumentGuess: InstrumentGuess?
+    @Published private(set) var selected: LoadedSample?
     /// Waveform editor for the audio file being converted. Shown in place of the piano while set.
     @Published private(set) var editor: WaveEditor?
-    /// The SPC song being played. Replaces the piano and BRR detail views while set.
+    /// Kept alive while browsing samples; `showingSPC` selects the song's detail page.
     @Published private(set) var spc: SPCSession?
+    @Published private(set) var showingSPC = false
     /// Sample replacement for one track of the open SPC, shown in place of the SPC page while set.
     @Published private(set) var replacement: SPCReplacement?
     @Published private(set) var isPlaying = false
@@ -65,6 +63,7 @@ final class PreviewModel: ObservableObject {
             MainActor.assumeIsolated {
                 self?.releaseHeldLoop()
                 self?.editor?.stopPlayback()
+                self?.replacement?.releaseAllNotes()
             }
         }
         let savedPaths = UserDefaults.standard.stringArray(forKey: Self.foldersKey)
@@ -178,7 +177,8 @@ final class PreviewModel: ObservableObject {
 
     /// The file shown in the detail pane: the open SPC, the editor's audio file, or the selected BRR sample.
     var currentURL: URL? {
-        spc?.url ?? editor?.sourceURL ?? selected?.url
+        if replacement != nil { return replacement?.browserURL }
+        return showingSPC ? spc?.url : (editor?.sourceURL ?? selected?.url)
     }
 
     /// Moves to the next or previous sample across all folders, wrapping at the ends, and plays it.
@@ -203,7 +203,7 @@ final class PreviewModel: ObservableObject {
     func select(_ node: BrowserNode) {
         if replacement != nil {
             guard node.isAudio || node.isBRR else {
-                spc?.errorMessage = "Only audio or BRR files can preview as a replacement sample."
+                replacement?.errorMessage = "Choose an audio or BRR sample to preview."
                 return
             }
             stop()
@@ -214,7 +214,7 @@ final class PreviewModel: ObservableObject {
             openSPC(node.url)
             return
         }
-        closeSPC()
+        showingSPC = false
         if node.isAudio {
             openEditor(node.url)
             return
@@ -237,16 +237,6 @@ final class PreviewModel: ObservableObject {
             selected = nil
             errorMessage = "Couldn't read \(node.name): \(error.localizedDescription)"
         }
-    }
-
-    /// Runs the heuristic instrument classifier on the selected BRR sample.
-    func guessInstrument() {
-        guard let selected else { return }
-        instrumentGuess = InstrumentClassifier.guess(
-            samples: selected.decoded.samples,
-            sampleRate: BRRDecoder.sampleRate,
-            pitchHz: detectedFrequency,
-            hasLoop: selected.decoded.loopStart != nil || selected.decoded.hasLoopFlag)
     }
 
     func togglePlayback() {
@@ -305,11 +295,12 @@ final class PreviewModel: ObservableObject {
     /// Handles the window's keyboard shortcuts. Returns true when the event was used.
     func handleKeyDown(_ event: NSEvent) -> Bool {
         guard !(event.window is NSPanel),
+              !((event.window?.firstResponder as? NSTextView)?.isFieldEditor ?? false),
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty
         else { return false }
 
         if replacement != nil { return handleReplacementKey(event) }
-        if spc != nil { return handleSPCKey(event) }
+        if spc != nil && showingSPC { return handleSPCKey(event) }
 
         // Tab also reports a specialKey, so only arrows are handled here.
         if let special = event.specialKey, [.upArrow, .downArrow, .leftArrow, .rightArrow].contains(special) {
@@ -372,28 +363,33 @@ final class PreviewModel: ObservableObject {
         return true
     }
 
-    /// Space and Tab drive the new sample's preview. Arrows are swallowed so they don't change songs mid-replacement.
     private func handleReplacementKey(_ event: NSEvent) -> Bool {
+        guard let replacement else { return false }
         if let special = event.specialKey, [.upArrow, .downArrow, .leftArrow, .rightArrow].contains(special) {
+            if !event.isARepeat {
+                if special == .leftArrow { replacement.shiftOctave(-1) }
+                if special == .rightArrow { replacement.shiftOctave(1) }
+            }
             return true
         }
         guard let key = event.charactersIgnoringModifiers?.lowercased().first else { return false }
         switch key {
         case " ":
-            if !event.isARepeat { replacement?.togglePreview() }
+            if !event.isARepeat { replacement.togglePreview() }
             return true
         case "\t":
-            if !event.isARepeat { replacement?.newEditor?.loopPreview.toggle() }
+            if !event.isARepeat { replacement.toggleLoop() }
             return true
         default:
-            return false
+            return replacement.keyDown(key, repeating: event.isARepeat)
         }
     }
 
     /// Releases the note a piano key started. Returns true when the event was used.
     func handleKeyUp(_ event: NSEvent) -> Bool {
-        guard let key = event.charactersIgnoringModifiers?.lowercased().first,
-              let note = heldKeyNotes.removeValue(forKey: key)
+        guard let key = event.charactersIgnoringModifiers?.lowercased().first else { return false }
+        if let replacement { return replacement.keyUp(key) }
+        guard let note = heldKeyNotes.removeValue(forKey: key)
         else { return false }
         releaseNote(note)
         return true
@@ -432,6 +428,10 @@ final class PreviewModel: ObservableObject {
     }
 
     private func openSPC(_ url: URL) {
+        if spc?.url == url {
+            goToSPC()
+            return
+        }
         do {
             let session = try SPCSession(url: url)
             stop()
@@ -440,6 +440,7 @@ final class PreviewModel: ObservableObject {
             cancelReplacement()
             spc?.shutdown()
             spc = session
+            showingSPC = true
             errorMessage = nil
             session.play()
         } catch {
@@ -447,10 +448,11 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    private func closeSPC() {
-        cancelReplacement()
-        spc?.shutdown()
-        spc = nil
+    func goToSPC() {
+        guard spc != nil else { return }
+        stop()
+        editor?.stopPlayback()
+        showingSPC = true
     }
 
     func beginReplacement(voice: Int) {
@@ -473,6 +475,10 @@ final class PreviewModel: ObservableObject {
     }
 
     private func beginReplacement(_ spc: SPCSession, snapshot: SPCSampleSnapshot, label: String) {
+        NSApplication.shared.keyWindow?.makeFirstResponder(nil)
+        stop()
+        editor?.stopPlayback()
+        showingSPC = true
         cancelReplacement()
         replacement = SPCReplacement(session: spc, snapshot: snapshot, label: label)
     }
@@ -514,7 +520,8 @@ final class PreviewModel: ObservableObject {
             return
         }
         saveSample(spc, snapshot, track: nil, label: "voice \(voice + 1)",
-                   fileName: String(format: "voice%d-%02X.brr", voice + 1, snapshot.sourceIndex))
+                   fileName: spc.sampleFileStem(sourceIndex: snapshot.sourceIndex,
+                                                fallback: String(format: "voice%d-%02X", voice + 1, snapshot.sourceIndex)) + ".brr")
     }
 
     func extractSample(track: SPCTrackState) {
@@ -524,7 +531,8 @@ final class PreviewModel: ObservableObject {
             return
         }
         saveSample(spc, snapshot, track: track, label: "track \(track.number)",
-                   fileName: String(format: "track%02d-%02X.brr", track.number, snapshot.sourceIndex))
+                   fileName: spc.sampleFileStem(sourceIndex: snapshot.sourceIndex,
+                                                fallback: String(format: "track%02d-%02X", track.number, snapshot.sourceIndex)) + ".brr")
     }
 
     private func saveSample(_ spc: SPCSession, _ snapshot: SPCSampleSnapshot, track: SPCTrackState?,
@@ -542,22 +550,33 @@ final class PreviewModel: ObservableObject {
     }
 
     /// Writes every distinct sample in the song to a folder the user picks.
-    func extractAllSamples() {
-        guard let spc else { return }
+    func extractAllSamples(duration: Double) {
+        guard let spc, !spc.isExtracting else { return }
+        guard duration.isFinite, duration > 0, duration <= 3600 else {
+            spc.errorMessage = "Choose a scan length greater than 0 and no more than 60 minutes."
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.prompt = "Extract"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
-        do {
-            let count = try spc.extractAll(to: folder)
-            spc.errorMessage = nil
-            spc.statusMessage = count == 0
-                ? "No samples found in the song."
-                : "Extracted \(count) sample\(count == 1 ? "" : "s") to \(folder.lastPathComponent)."
-        } catch {
-            spc.errorMessage = "Couldn't extract samples: \(error.localizedDescription)"
+        spc.isExtracting = true
+        spc.errorMessage = nil
+        spc.statusMessage = "Scanning \(Int(duration / 60)) minutes for used samples…"
+        Task {
+            defer { spc.isExtracting = false }
+            do {
+                let count = try await spc.extractAll(to: folder, duration: duration)
+                spc.errorMessage = nil
+                spc.statusMessage = count == 0
+                    ? "No audible BRR samples found in the scanned interval."
+                    : "Extracted \(count) sample\(count == 1 ? "" : "s") to \(folder.lastPathComponent)."
+            } catch {
+                spc.errorMessage = "Couldn't extract samples: \(error.localizedDescription)"
+                spc.statusMessage = nil
+            }
         }
     }
 

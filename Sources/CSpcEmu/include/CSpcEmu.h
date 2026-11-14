@@ -22,6 +22,14 @@ typedef struct SpcTrackInfo {
     long length_ms;
 } SpcTrackInfo;
 
+typedef struct SpcCapturedSample {
+    int source_index;
+    int directory_address;
+    int start;
+    int loop_address;
+    int block_count;
+} SpcCapturedSample;
+
 /* Copies `size` bytes of an SPC file. Returns NULL and fills err on failure. */
 SpcEmu *spc_open(const unsigned char *data, long size, int sample_rate, char *err, int err_size);
 void spc_close(SpcEmu *emu);
@@ -39,6 +47,13 @@ int spc_track_info(SpcEmu *emu, SpcTrackInfo *info);
 
 /* Copies the most recent `count` pre-volume output values of a voice, oldest first. */
 int spc_copy_voice_tap(SpcEmu *emu, int voice, short *out, int count);
+
+/* Collects BRR chains when they first produce nonzero, non-noise voice output.
+   Used on an independent offline emulator; repeated notes are deduplicated. */
+void spc_begin_sample_capture(SpcEmu *emu);
+int spc_captured_sample_count(SpcEmu *emu);
+int spc_copy_captured_sample(SpcEmu *emu, int index, SpcCapturedSample *info,
+                             unsigned char *out, int capacity);
 
 int spc_read_dsp(SpcEmu *emu, int reg);
 

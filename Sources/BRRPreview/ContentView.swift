@@ -50,7 +50,7 @@ struct BrowserList: View {
         }
         .safeAreaInset(edge: .bottom, alignment: .leading) {
             if let spc = model.spc {
-                SPCTransportView(session: spc)
+                SPCTransportView(session: spc, returnToSPC: model.showingSPC ? nil : { model.goToSPC() })
                     .padding(10)
             }
         }
@@ -89,23 +89,39 @@ struct BrowserBackdrop: View {
 struct BrowserRowView: View {
     @ObservedObject var model: PreviewModel
     let row: BrowserRow
+    @State private var hovering = false
 
     var body: some View {
         let node = row.node
         Group {
             if node.isDirectory {
-                Button {
-                    model.toggleExpanded(node)
-                } label: {
-                    Label {
-                        Text(node.name)
-                    } icon: {
-                        Image(systemName: model.isExpanded(node) ? "folder.fill" : "folder")
+                HStack(spacing: 4) {
+                    Button {
+                        model.toggleExpanded(node)
+                    } label: {
+                        Label {
+                            Text(node.name)
+                        } icon: {
+                            Image(systemName: model.isExpanded(node) ? "folder.fill" : "folder")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    if row.depth == 0 {
+                        Button {
+                            model.removeFolder(node)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(hovering ? 1 : 0)
+                        .help("Remove folder from browser (does not delete files)")
+                        .accessibilityLabel("Remove \(node.name)")
+                    }
                 }
-                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
                 .contextMenu {
                     if row.depth == 0 {
                         Button("Remove Folder") {
@@ -114,18 +130,26 @@ struct BrowserRowView: View {
                     }
                 }
             } else {
-                Button {
-                    model.select(node)
-                } label: {
-                    Label(node.name, systemImage: node.isSPC ? "music.note.list" : (node.isAudio ? "music.note" : "waveform"))
-                        .foregroundStyle(model.currentURL == node.url ? Color.accentColor : Color.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                Group {
+                    if let replacement = model.replacement, node.isBRR || node.isAudio {
+                        Button {} label: { fileLabel(node) }
+                            .buttonStyle(AuditionPressStyle(
+                                onPress: { replacement.previewSource(node.url, sustained: true) },
+                                onRelease: replacement.releaseBrowserPreview))
+                            .onDisappear { replacement.stopBrowserPreview() }
+                    } else {
+                        Button {
+                            model.select(node)
+                        } label: {
+                            fileLabel(node)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
                 .onDrag {
                     NSItemProvider(contentsOf: node.url) ?? NSItemProvider()
                 }
+
                 .contextMenu {
                     if row.depth == 0 {
                         Button("Remove File") {
@@ -136,6 +160,13 @@ struct BrowserRowView: View {
             }
         }
         .padding(.leading, CGFloat(row.depth) * 14)
+    }
+
+    private func fileLabel(_ node: BrowserNode) -> some View {
+        Label(node.name, systemImage: node.isSPC ? "music.note.list" : (node.isAudio ? "music.note" : "waveform"))
+            .foregroundStyle(model.currentURL == node.url ? Color.accentColor : Color.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
     }
 }
 
@@ -151,13 +182,21 @@ struct DetailView: View {
 
             if let replacement = model.replacement {
                 SPCReplaceView(model: model, replacement: replacement)
-            } else if let spc = model.spc {
+            } else if let spc = model.spc, model.showingSPC {
                 SPCDetailView(model: model, session: spc)
             } else if let editor = model.editor {
-                WaveEditorView(editor: editor)
+                WaveEditorView(editor: editor, returnToPlayback: model.spc == nil ? nil : { model.goToSPC() })
             } else if let sample = model.selected {
-                Text(sample.name)
-                    .font(.title2.bold())
+                HStack {
+                    Text(sample.name)
+                        .font(.title2.bold())
+                    Spacer()
+                    if model.spc != nil {
+                        Button(action: model.goToSPC) {
+                            Label("Go back to playback", systemImage: "arrow.left")
+                        }
+                    }
+                }
                 Text(sample.url.deletingLastPathComponent().path)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -169,17 +208,7 @@ struct DetailView: View {
 
                 PitchInfoView(model: model)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Button("Guess Instrument") {
-                        model.guessInstrument()
-                    }
-                    .help("Heuristic guess from the envelope and spectrum. It is not a trained model.")
-                    if let guess = model.instrumentGuess {
-                        InstrumentGuessView(guess: guess)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
+                PianoView(model: model)
                     .frame(height: 96)
 
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
@@ -234,22 +263,6 @@ struct DetailView: View {
     }
 }
 
-struct InstrumentGuessView: View {
-    let guess: InstrumentGuess
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(String(format: "Guess: %@ (%.0f%%)", guess.instrument.displayName, guess.confidence * 100))
-                .fontWeight(.medium)
-            Text(guess.reasons.joined(separator: " · "))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .font(.callout)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 struct PitchInfoView: View {
     @ObservedObject var model: PreviewModel
 
@@ -275,6 +288,19 @@ struct PitchInfoView: View {
 struct PianoView: View {
     @ObservedObject var model: PreviewModel
 
+    var body: some View {
+        NoteKeyboardView(selectedNote: model.selectedNote, noteRange: model.noteRange,
+                         noteOn: { model.playNote($0, loop: model.loopEnabled) },
+                         noteOff: model.releaseNote, shiftOctave: model.shiftOctave)
+    }
+}
+
+struct NoteKeyboardView: View {
+    let selectedNote: Int
+    let noteRange: ClosedRange<Int>
+    let noteOn: (Int) -> Void
+    let noteOff: (Int) -> Void
+    let shiftOctave: (Int) -> Void
     private let whiteSemitones = [0, 2, 4, 5, 7, 9, 11, 12]
     /// Black keys with the index of the white key to their left.
     private let blackKeys: [(semitone: Int, whiteIndex: Int)] = [(1, 0), (3, 1), (6, 3), (8, 4), (10, 5)]
@@ -289,7 +315,7 @@ struct PianoView: View {
 
     /// Shows one octave starting at the C of the selected note.
     private var octaveBase: Int {
-        model.keyboardOctaveBase
+        (selectedNote / 12) * 12
     }
 
     private var keyboard: some View {
@@ -313,10 +339,11 @@ struct PianoView: View {
     }
 
     private func key(_ note: Int, isBlack: Bool) -> some View {
-        let isSelected = note == model.selectedNote
-        let isEnabled = model.noteRange.contains(note)
+        let isSelected = note == selectedNote
+        let isEnabled = noteRange.contains(note)
         let fill: Color = isSelected ? .accentColor : (isBlack ? .black : .white)
-        return Text(note % 12 == 0 ? Note.name(midi: note) : "")
+        return Button {} label: {
+            Text(note % 12 == 0 ? Note.name(midi: note) : "")
             .font(.caption2)
             .foregroundStyle(isBlack || isSelected ? Color.white : Color.black)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -325,29 +352,48 @@ struct PianoView: View {
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.black.opacity(0.6), lineWidth: 1))
             .contentShape(Rectangle())
             .opacity(isEnabled ? 1 : 0.4)
-            .allowsHitTesting(isEnabled)
-            .onLongPressGesture(minimumDuration: 0, maximumDistance: .infinity, perform: {}, onPressingChanged: { isDown in
-                if isDown {
-                    model.playNote(note, loop: model.loopEnabled)
-                } else {
-                    model.releaseNote(note)
-                }
-            })
-            .help(Note.name(midi: note))
+        }
+        .buttonStyle(AuditionPressStyle(onPress: { noteOn(note) }, onRelease: { noteOff(note) }))
+        .disabled(!isEnabled)
+        .help(Note.name(midi: note))
     }
 
 
     private func octaveButton(systemImage: String, direction: Int) -> some View {
-        let target = model.selectedNote + 12 * direction
+        let target = selectedNote + 12 * direction
         return Button {
-            model.shiftOctave(direction)
+            shiftOctave(direction)
         } label: {
             Image(systemName: systemImage)
                 .frame(width: 24, height: 24)
         }
         .buttonStyle(.bordered)
-        .disabled(!model.noteRange.contains(target))
+        .disabled(!noteRange.contains(target))
         .help(direction < 0 ? "Down one octave" : "Up one octave")
+    }
+}
+
+struct AuditionPressStyle: ButtonStyle {
+    let onPress: () -> Void
+    let onRelease: () -> Void
+    @State private var releaseAction: (() -> Void)?
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .onChange(of: configuration.isPressed) { down in
+                if down {
+                    releaseAction = onRelease
+                    onPress()
+                } else {
+                    let release = releaseAction
+                    releaseAction = nil
+                    release?()
+                }
+            }
+            .onDisappear {
+                releaseAction?()
+                releaseAction = nil
+            }
     }
 }
 

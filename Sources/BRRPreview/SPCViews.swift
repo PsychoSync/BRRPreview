@@ -4,6 +4,7 @@ import SwiftUI
 /// Play, pause, stop, and volume for the loaded SPC. Sits in the sidebar's lower left corner.
 struct SPCTransportView: View {
     @ObservedObject var session: SPCSession
+    var returnToSPC: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -26,6 +27,10 @@ struct SPCTransportView: View {
             }
             .buttonStyle(.borderless)
             .font(.title3)
+
+            if let returnToSPC {
+                Button("Go to spc", action: returnToSPC)
+            }
 
             HStack(spacing: 6) {
                 Image(systemName: "speaker.fill")
@@ -63,6 +68,9 @@ struct SPCDetailView: View {
     @State private var showingSaveSheet = false
     /// Tags the user confirmed in the save sheet. The save panel opens once the sheet has closed.
     @State private var confirmedTags: SPCExtendedTags?
+    @State private var showingScanSheet = false
+    @State private var scanMinutes = 12.0
+    @State private var confirmedScan = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -83,9 +91,13 @@ struct SPCDetailView: View {
                 Spacer()
                 HStack {
                     Button("Extract All Samples…") {
-                        model.extractAllSamples()
+                        showingScanSheet = true
                     }
-                    .help("Save every distinct sample in the song as BRR, each with a metadata sidecar")
+                    .disabled(session.isExtracting)
+                    .help("Scan the song separately and save only samples that produce sound")
+                    if session.isExtracting {
+                        ProgressView().controlSize(.small)
+                    }
 
                     Button("Save SPC As…") {
                         showingSaveSheet = true
@@ -134,6 +146,36 @@ struct SPCDetailView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingScanSheet, onDismiss: {
+            if confirmedScan {
+                confirmedScan = false
+                model.extractAllSamples(duration: scanMinutes * 60)
+            }
+        }) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Extract used samples").font(.headline)
+                Text("Scan from the beginning in a separate emulator. Playback is not interrupted. Only BRR samples that produce sound during this duration are extracted.")
+                HStack {
+                    TextField("Scan length (minutes)", value: $scanMinutes, format: .number)
+                    Text("minutes")
+                }
+                Text("12 minutes covers most songs. Increase this for longer songs or late instrument changes.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingScanSheet = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Choose Folder…") {
+                        confirmedScan = true
+                        showingScanSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!scanMinutes.isFinite || scanMinutes <= 0 || scanMinutes > 60)
+                }
+            }
+            .padding(24)
+            .frame(width: 420)
+        }
         .sheet(isPresented: $showingSaveSheet, onDismiss: {
             if let tags = confirmedTags {
                 confirmedTags = nil
@@ -151,43 +193,15 @@ struct SPCDetailView: View {
     }
 }
 
-/// The latest guess for one SRCN. It is kept with its SRCN so a row can hide it once the sample changes.
-struct SRCNGuess: Equatable {
-    let sourceIndex: Int
-    let guess: InstrumentGuess?
-}
-
-/// The guess line under a row. It only appears while the row still plays the sample that was guessed.
-struct SRCNGuessLine: View {
-    let guess: SRCNGuess?
-    let sourceIndex: Int
-
-    var body: some View {
-        if let guess, guess.sourceIndex == sourceIndex {
-            if let result = guess.guess {
-                InstrumentGuessView(guess: result)
-                    .padding(.horizontal, 8)
-            } else {
-                Text("No guess: the sample is empty or can't be read.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-            }
-        }
-    }
-}
-
 /// One DSP voice: its sample, live spectrum, mute and solo, and extract or replace actions.
 struct SPCVoiceRow: View {
     @ObservedObject var model: PreviewModel
     @ObservedObject var session: SPCSession
     let voice: SPCVoiceState
-    @State private var guess: SRCNGuess?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             row
-            SRCNGuessLine(guess: guess, sourceIndex: voice.sampleIndex)
         }
     }
 
@@ -225,12 +239,6 @@ struct SPCVoiceRow: View {
                 .tint(soloed ? Color.yellow : Color.secondary)
                 .help("Solo this track")
 
-                Button("Guess") {
-                    guess = SRCNGuess(sourceIndex: voice.sampleIndex,
-                                      guess: session.guessInstrument(sourceIndex: voice.sampleIndex))
-                }
-                .help("Heuristic guess at this sample's instrument type. It is not a trained model.")
-
                 Button("Extract…") {
                     model.extractSample(voice: voice.index)
                 }
@@ -259,12 +267,10 @@ struct SPCTrackRow: View {
     @ObservedObject var model: PreviewModel
     @ObservedObject var session: SPCSession
     let track: SPCTrackState
-    @State private var guess: SRCNGuess?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             row
-            SRCNGuessLine(guess: guess, sourceIndex: track.sourceIndex)
         }
     }
 
@@ -294,35 +300,42 @@ struct SPCTrackRow: View {
             }
             .opacity(muted ? 0.35 : 1)
 
-            HStack(spacing: 6) {
-                Button("M") {
-                    session.toggleTrackMute(track.sourceIndex)
-                }
-                .tint(muted ? Color.red : Color.secondary)
-                .help("Mute this track")
+            VStack(alignment: .leading, spacing: 6) {
+                TextField(
+                    "Instrument name",
+                    text: Binding(
+                        get: { session.sampleNames[track.sourceIndex] ?? "" },
+                        set: { session.sampleNames[track.sourceIndex] = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .help("Used as the filename for Extract and Extract All; kept for this song while it is open")
 
-                Button("S") {
-                    session.toggleTrackSolo(track.sourceIndex)
-                }
-                .tint(soloed ? Color.yellow : Color.secondary)
-                .help("Solo this track")
+                HStack(spacing: 6) {
+                    Button("M") {
+                        session.toggleTrackMute(track.sourceIndex)
+                    }
+                    .tint(muted ? Color.red : Color.secondary)
+                    .help("Mute this track")
 
-                Button("Guess") {
-                    guess = SRCNGuess(sourceIndex: track.sourceIndex,
-                                      guess: session.guessInstrument(sourceIndex: track.sourceIndex))
-                }
-                .help("Heuristic guess at this sample's instrument type. It is not a trained model.")
+                    Button("S") {
+                        session.toggleTrackSolo(track.sourceIndex)
+                    }
+                    .tint(soloed ? Color.yellow : Color.secondary)
+                    .help("Solo this track")
 
-                Button("Extract…") {
-                    model.extractSample(track: track)
-                }
-                .help("Save this track's BRR sample with its loop point and metadata")
+                    Button("Extract…") {
+                        model.extractSample(track: track)
+                    }
+                    .help("Save this track's BRR sample with its loop point and metadata")
 
-                Button("Replace…") {
-                    model.beginReplacement(track: track)
+                    Button("Replace…") {
+                        model.beginReplacement(track: track)
+                    }
+                    .help("Replace this track's sample everywhere it plays, while the song keeps playing")
                 }
-                .help("Replace this track's sample everywhere it plays, while the song keeps playing")
             }
+            .frame(width: 220)
             .buttonStyle(.bordered)
             .controlSize(.small)
         }
